@@ -120,7 +120,7 @@ if st.sidebar.button("🧹 Clear Chat"):
 def load_chain():
     return get_qa_chain()
 
-qa_chain = load_chain()
+#qa_chain = load_chain()
 
 #CHAT MEMORY
 if "messages" not in st.session_state:
@@ -139,8 +139,15 @@ if query:
 
     with st.spinner("🤖 Thinking..."):
         time.sleep(0.5)
+
         try:
-            answer = qa_chain.run(query)
+            #Check DB exists
+            if not os.path.exists("./db"):
+                answer = "⚠️ Please process documents first!"
+            else:
+                qa_chain = get_qa_chain()  
+                answer = qa_chain.run(query)
+
         except Exception as e:
             answer = f"⚠️ Error: {e}"
 

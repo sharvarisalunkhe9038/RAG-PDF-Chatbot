@@ -110,12 +110,17 @@ for d in docs[:self.k])
 #Load the database and prepare QA chain
 def get_qa_chain():
     embeddings = SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
+
+    # ✅ Check if DB exists
+    if not os.path.exists("./db"):
+        raise ValueError("⚠️ Vector DB not found. Please click 'Process Documents' first.")
+
     db = FAISS.load_local("./db", embeddings, allow_dangerous_deserialization=True)
     retriever = db.as_retriever(search_kwargs={"k": 5})
 
     llm = ChatGroq(
         temperature=0,
-        model="llama-3.1-8b-instant", 
+        model="llama-3.1-8b-instant",
         groq_api_key=groq_key
     )
 
