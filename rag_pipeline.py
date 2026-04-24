@@ -1,5 +1,5 @@
 import os
-from typing import List, Dict, Any
+from typing import Dict
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import SentenceTransformerEmbeddings
@@ -7,115 +7,137 @@ from langchain_community.vectorstores import FAISS
 from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 
-#Load environment variables
 load_dotenv()
 groq_key = os.getenv("GROQ_API_KEY")
 
-if not groq_key:
-    raise ValueError("❌ GROQ_API_KEY not found! Please add it to your .env file.")
-
-#Load all PDF files
+# LOAD DOCUMENTS
 def _collect_docs(folder_path: str):
     docs = []
     for fname in os.listdir(folder_path):
         fpath = os.path.join(folder_path, fname)
+
         if fname.lower().endswith(".pdf"):
             docs.extend(PyPDFLoader(fpath).load())
+
         elif fname.lower().endswith(".docx"):
             docs.extend(Docx2txtLoader(fpath).load())
+
     if not docs:
-        raise ValueError("⚠️ No PDF or DOCX files found in the folder!")
+        raise ValueError("No documents found")
+
     return docs
 
 
-#Create and store FAISS database
+# CREATE VECTOR DB
 def create_vector_db(folder_path: str):
-    import shutil
+    from langchain_community.embeddings import SentenceTransformerEmbeddings
+    from langchain_community.vectorstores import FAISS
 
-    #Clear old DB
+    # ✅ DEFINE FIRST
+    embeddings = SentenceTransformerEmbeddings(
+        model_name="all-MiniLM-L6-v2"
+    )
+
+    # ✅ THEN CHECK DB
     if os.path.exists("./db"):
-        shutil.rmtree("./db")
+        return FAISS.load_local(
+            "./db",
+            embeddings,
+            allow_dangerous_deserialization=True
+        )
 
-    #Load documents
+    # LOAD DOCS
     docs = _collect_docs(folder_path)
 
-    #Split into chunks
-    splitter = RecursiveCharacterTextSplitter(chunk_size=700, chunk_overlap=150)
+    # SPLIT (FAST)
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=800,
+        chunk_overlap=150
+    )
     chunks = splitter.split_documents(docs)
 
-    #Create embeddings
-    embeddings = SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
-
-    #Create FAISS DB
+    # CREATE DB
     db = FAISS.from_documents(chunks, embedding=embeddings)
     db.save_local("./db")
 
     return db
 
 
-#Helper class for QA
-class _SimpleQA:
+# QA CLASS
+class MedicalQA:
     def __init__(self, retriever, llm, k: int = 3):
         self.retriever = retriever
         self.llm = llm
         self.k = k
 
-    def _answer(self, query: str) -> str:
-        #Retrieve relevant chunks
+    def answer(self, query: str) -> str:
         docs = self.retriever.invoke(query)
-        print("DEBUG DOCS:", docs)
-        
-        if not docs:
-            return "⚠️ No relevant context found in the documents."
+        print("Retrieved docs:", len(docs))
 
-        #Combine retrieved text
-        context = "\n\n".join(
-f"📄 {d.metadata.get('source','Document')}:\n{d.page_content}"
-for d in docs[:self.k])
+        if not docs or len(docs) == 0:
+            return "NOT_FOUND"
+    
 
-        #Create a clear prompt
-        prompt = (
-    "You are a helpful assistant.\n"
-    "Answer based on the context. Try your best.\n"
-    "If exact answer is not found, give the closest possible answer.\n\n"
-    f"Context:\n{context}\n\n"
-    f"Question: {query}\n"
-    "Answer:"
-)
-        
+        context = "\n\n".join(d.page_content[:1000] for d in docs[:self.k])
 
-        #Call Groq model
+        prompt = f"""
+You are a friendly medical assistant chatbot.
+
+Understand the user's question and answer accordingly.
+
+RULES:
+- If user asks definition → give short definition
+- If user asks symptoms → give only symptoms
+- If user asks treatment → give only treatment
+- If user asks diet → give simple food suggestions
+- If user asks explanation → give simple explanation
+- DO NOT force all sections (Definition, Causes, etc.)
+- Answer ONLY what is asked
+
+LANGUAGE:
+- Use very simple English (like explaining to a normal person)
+- Avoid complex medical terms
+- If needed, explain difficult words in simple way
+
+FORMAT:
+- Keep answer short and clear
+- Use bullet points if needed
+- Be human-friendly (like ChatGPT)
+
+IMPORTANT:
+- Use ONLY the provided context
+- If no answer → return "NOT_FOUND"
+
+Context:
+{context}
+
+Question: {query}
+
+Answer:
+"""
+
         response = self.llm.invoke(prompt)
 
-        try:
-            if hasattr(response, "content"):
-                return response.content.strip()
-            elif isinstance(response, dict) and "content" in response:
-                return str(response["content"]).strip()
-            elif isinstance(response, str):
-                return response.strip()
-            else:
-                return str(response)
-        except Exception as e:
-            return f"⚠️ Could not parse response properly: {e}"
+        text = response.content if hasattr(response, "content") else str(response)
 
-    def run(self, query: str) -> str:
-        return self._answer(query)
-
-    def invoke(self, inputs: Dict[str, str]) -> Dict[str, str]:
-        q = inputs.get("query", "")
-        return {"result": self._answer(q)}
+        if text.strip().upper() == "NOT_FOUND":
+            return "NOT_FOUND"
 
 
-#Load the database and prepare QA chain
+        return text.strip()
+
+
 def get_qa_chain():
-    embeddings = SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
+    embeddings = SentenceTransformerEmbeddings(
+        model_name="all-MiniLM-L6-v2"
+    )
 
-    # ✅ Check if DB exists
-    if not os.path.exists("./db"):
-        raise ValueError("⚠️ Vector DB not found. Please click 'Process Documents' first.")
+    db = FAISS.load_local(
+        "./db",
+        embeddings,
+        allow_dangerous_deserialization=True
+    )
 
-    db = FAISS.load_local("./db", embeddings, allow_dangerous_deserialization=True)
     retriever = db.as_retriever(search_kwargs={"k": 5})
 
     llm = ChatGroq(
@@ -124,4 +146,4 @@ def get_qa_chain():
         groq_api_key=groq_key
     )
 
-    return _SimpleQA(retriever=retriever, llm=llm, k=3)
+    return MedicalQA(retriever, llm)
